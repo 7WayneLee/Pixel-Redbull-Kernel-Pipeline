@@ -75,7 +75,7 @@ diff --git a/fs/read_write.c b/fs/read_write.c
 diff --git a/fs/stat.c b/fs/stat.c
 --- a/fs/stat.c
 +++ b/fs/stat.c
-@@ -162,5 +162,9 @@
+@@ -148,6 +148,10 @@
  }
  EXPORT_SYMBOL(vfs_statx_fd);
  
@@ -85,14 +85,15 @@ diff --git a/fs/stat.c b/fs/stat.c
 +
  /**
   * vfs_statx - Get basic and extra attributes by filename
-@@ -190,6 +194,10 @@
+  * @dfd: A file descriptor representing the base dir for a relative filename
+@@ -169,6 +173,10 @@
+ 	struct path path;
  	int error = -EINVAL;
- 	unsigned int lookup_flags = LOOKUP_FOLLOW;
- 
+ 	unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;
++
 +#ifdef CONFIG_KSU
 +	ksu_handle_stat(&dfd, &filename, &flags);
 +#endif
-+
+ 
  	if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT |
  		       AT_EMPTY_PATH | KSTAT_QUERY_FLAGS)) != 0)
- 		return -EINVAL;
