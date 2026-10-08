@@ -1,197 +1,50 @@
-name: Kernel build for redbull device
-
-# PHASE 1 (main mới): CHỈ build kernel redbull (redfin/bramble) KHÔNG patch,
-# để chứng minh kernel custom được và ra boot.img/vendor_boot.img/dtbo.img.
-# KSU / SUSFS / modules sẽ được mod dần ở các phase sau.
-# Pipeline KSU/SUSFS đầy đủ trước đây nằm ở nhánh `main-legacy`.
-#
-# Theo đúng flow cũ: repo sync -> chèn ramdisk gốc -> build_redbull-gki.sh -> đóng gói.
+name: Pixel 5 clean kernel (baseline / Next)
 
 on:
   workflow_dispatch:
     inputs:
-      device:
-        type: choice
-        description: 'Thiết bị'
+      mode:
+        description: 'Build baseline first; use next only after baseline boots'
         required: true
-        default: 'redfin'
-        options:
-          - redfin
-          - bramble
-      android_version:
+        default: baseline
         type: choice
-        description: 'Branch manifest (phải có ramdisk tương ứng trong repo)'
-        required: true
-        default: 'android-msm-redbull-4.19-android14'
         options:
-          - android-msm-redbull-4.19-android12
-          - android-msm-redbull-4.19-android13-qpr3
-          - android-msm-redbull-4.19-android14
-      ksu:
-        type: choice
-        description: 'KernelSU-Next: none | v3 (kprobes) | legacy | v1 (manual hook)'
-        required: true
-        default: 'none'
-        options:
-          - 'none'
-          - 'v3'
-          - 'legacy'
-          - 'v1'
-      ksu_ref:
-        type: string
-        description: 'Tag/commit KSU-Next (v3→v3.3.0, legacy→v3.2.0-legacy, v1→v1.1.1)'
-        required: false
-        default: 'v3.3.0'
+          - baseline
+          - next
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pixel5-clean-${{ github.ref }}-${{ inputs.mode }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
     steps:
-      - name: Display build
-        run: |
-          echo "Device: ${{ github.event.inputs.device }}"
-          echo "Android/branch: ${{ github.event.inputs.android_version }}"
-
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
+      - uses: actions/checkout@v4
         with:
-          root-reserve-mb: 8192
-          temp-reserve-mb: 2048
-          swap-size-mb: 8192
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set environment
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare Linux build environment
         run: |
-          CONFIG=${{ github.event.inputs.device }}
-          ANDROID_BRANCH=${{ github.event.inputs.android_version }}
-          echo "CONFIG=$CONFIG" >> $GITHUB_ENV
-          echo "ANDROID_BRANCH=$ANDROID_BRANCH" >> $GITHUB_ENV
-          echo "RAMDISK_PATH=$GITHUB_WORKSPACE/ramdisk/$CONFIG/$ANDROID_BRANCH" >> $GITHUB_ENV
-
-      - name: Install Repo
-        run: |
-          mkdir -p ./git-repo
-          curl https://storage.googleapis.com/git-repo-downloads/repo > ./git-repo/repo
-          chmod a+rx ./git-repo/repo
-          echo "REPO=$GITHUB_WORKSPACE/./git-repo/repo" >> $GITHUB_ENV
-
-      - name: Install deps
-        run: |
-          sudo apt update
-          sudo apt install -y build-essential flex bison libssl-dev libelf-dev \
-            libncurses5-dev gcc-aarch64-linux-gnu make dwarves zip curl
-
-      - name: Git identity
-        run: |
-          git config --global user.name "ci"
-          git config --global user.email "ci@example.com"
-          git config --global color.ui false
-
-      - name: 🔍 Locate ramdisk (fail nếu thiếu)
-        run: |
-          echo "Tìm ramdisk trong: $RAMDISK_PATH"
-          if [ ! -f "$RAMDISK_PATH/ramdisk" ] || [ ! -f "$RAMDISK_PATH/vendor_ramdisk" ]; then
-            echo "::error::Thiếu ramdisk/vendor_ramdisk tại $RAMDISK_PATH"
-            echo "::error::Cặp device + android_version này chưa có ramdisk trong repo."
-            exit 1
-          fi
-          echo "OK"; ls -l "$RAMDISK_PATH"
-
-      - name: Initialize & Sync Kernel Source
-        run: |
-          set -e
-          mkdir -p "$CONFIG"
-          cp -fv "$RAMDISK_PATH/ramdisk" "$CONFIG/"
-          cp -fv "$RAMDISK_PATH/vendor_ramdisk" "$CONFIG/"
-          cd "$CONFIG"
-          echo "repo init -b $ANDROID_BRANCH"
-          $REPO init --depth=1 -u https://android.googlesource.com/kernel/manifest -b $ANDROID_BRANCH
-          $REPO --version
-          $REPO --trace sync -c -j$(nproc --all) --no-tags --fail-fast
-          # chèn ramdisk gốc vào prebuilts để build_redbull-gki dùng
-          cp -fv ramdisk prebuilts/boot-artifacts/ramdisks/ramdisk-aosp_arm64.img
-          cp -fv vendor_ramdisk prebuilts/boot-artifacts/ramdisks/vendor_ramdisk-barbet.img
-          cp -fv vendor_ramdisk prebuilts/boot-artifacts/ramdisks/vendor_ramdisk-redfin.img
-          cp -fv vendor_ramdisk prebuilts/boot-artifacts/ramdisks/vendor_ramdisk-bramble.img
-
-      - name: Fix build config (bỏ check_defconfig)
-        run: |
-          cd "$CONFIG/private/msm-google/"
-          sed -i 's/check_defconfig//' ./build.config.common || true
-          sed -i 's/check_defconfig//' ./build.config.redbull || true
-          sed -i 's/check_defconfig && //' ./build.config.redbull.no-cfi || true
-
-      - name: Patch KernelSU-Next
-        if: ${{ github.event.inputs.ksu != 'none' }}
-        run: |
-          set -e
-          cd "$CONFIG/private/msm-google"
-          REF="${{ github.event.inputs.ksu_ref }}"
-          echo "==> setup.sh KernelSU-Next ref=$REF (mode=${{ github.event.inputs.ksu }})"
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${REF}/kernel/setup.sh" | bash -s "$REF"
-          [ -e drivers/kernelsu ] || { echo "::error::setup.sh không tạo drivers/kernelsu"; exit 1; }
-
-          case "${{ github.event.inputs.ksu }}" in
-            v3)
-              echo "== v3 kprobes-based (KHÔNG vá source) =="
-              CFG='-e KPROBES -e KRETPROBES -e EXT4_FS -e KSU' ;;
-            legacy)
-              echo "== legacy kprobes+tracepoint (KHÔNG vá source): ép KSU_KPROBES_HOOK, tắt MANUAL =="
-              CFG='-e KPROBES -e KRETPROBES -e EXT4_FS -e KSU -e KSU_KPROBES_HOOK -d KSU_MANUAL_HOOK' ;;
-            v1)
-              echo "== manual hook (vá fs/*.c) — ksun_hooks_4.19.patch từ main-legacy =="
-              curl -LSs "https://raw.githubusercontent.com/nghminh163/Pixel-Redbull-Kernel-Pipeline/main-legacy/kernel_patches/ksun_hooks_4.19.patch" -o ksun_hooks_4.19.patch
-              patch -p1 --fuzz=3 < ./ksun_hooks_4.19.patch
-              CFG='-e KSU -e KSU_MANUAL_HOOK -e TMPFS_XATTR' ;;
-          esac
-
-          # Ép config vào OUT/.config SAU khi defconfig sinh ra (append vào POST_DEFCONFIG_CMDS
-          # của build.config.redbull.vintf) — vì append thẳng redbull-gki_defconfig bị GKI bỏ qua.
-          cat >> build.config.redbull.vintf <<EOF
-
-          function ksu_config_enable() {
-            \${KERNEL_DIR}/scripts/config --file \${OUT_DIR}/.config $CFG
-            (cd \${OUT_DIR} && make O=\${OUT_DIR} CLANG_TRIPLE=\${CLANG_TRIPLE} CROSS_COMPILE=\${CROSS_COMPILE} "\${TOOL_ARGS[@]}" \${MAKE_ARGS} olddefconfig)
-          }
-          POST_DEFCONFIG_CMDS="\${POST_DEFCONFIG_CMDS} && ksu_config_enable"
-          EOF
-          echo "== đã inject ksu_config_enable ($CFG) vào build.config.redbull.vintf =="
-          tail -8 build.config.redbull.vintf
-
-      - name: Build kernel (không patch)
-        run: |
-          set -e
-          cd "$CONFIG"
-          # SKIP_MRPROPER=1: bỏ 'make mrproper' đầu (fresh sync không cần clean) — tránh
-          # legacy Kbuild bắn '$(error) No hooks' khi clean parse lúc chưa có .config.
-          SKIP=""
-          if [ "${{ github.event.inputs.ksu }}" != "none" ]; then SKIP="SKIP_MRPROPER=1"; fi
-          echo "env $SKIP BUILD_AOSP_KERNEL=1 ./build_redbull-gki.sh"
-          env $SKIP BUILD_AOSP_KERNEL=1 ./build_redbull-gki.sh
-          echo "== dist =="
-          ls -l ./out/android-msm-pixel-4.19/dist/ || find out -maxdepth 3 -name '*.img'
-
-      - name: Đóng gói fastboot.zip
-        run: |
-          set -e
-          cd "$CONFIG"
-          mkdir -p fastboot_files
-          cp -f ./out/android-msm-pixel-4.19/dist/boot.img fastboot_files/
-          cp -f ./out/android-msm-pixel-4.19/dist/vendor_boot.img fastboot_files/
-          cp -f ./out/android-msm-pixel-4.19/dist/dtbo.img fastboot_files/
-          cd fastboot_files/
-          zip -r fastboot.zip .
-          ls -l
-
-      - name: Upload result
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev libncurses5-dev libncurses5 lz4 rsync git curl
+          df -h "$GITHUB_WORKSPACE"
+      - name: Build pinned Google kernel
+        env:
+          PIXEL5_MODE: ${{ inputs.mode }}
+        run: bash tools/pixel5-clean/build.sh
+      - name: Upload kernel and build diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fastboot-${{ github.event.inputs.device }}-${{ github.event.inputs.android_version }}-ksu-${{ github.event.inputs.ksu }}
-          path: ${{ env.CONFIG }}/fastboot_files/fastboot.zip
+          name: pixel5-clean-${{ inputs.mode }}-${{ github.run_id }}
+          path: pixel5-artifacts/
           if-no-files-found: error
+          retention-days: 14
