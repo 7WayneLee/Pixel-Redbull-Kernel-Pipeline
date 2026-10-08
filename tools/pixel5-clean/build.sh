@@ -40,9 +40,11 @@ LTO_PY
 
 if [ "$PIXEL5_MODE" = next ]; then
   cd private/msm-google
-  git clone --depth 1 --branch v1.1.1 \
+  git clone --branch v1.1.1 \
     https://github.com/KernelSU-Next/KernelSU-Next.git KernelSU-Next
   git -C KernelSU-Next rev-parse HEAD >> "$PIXEL5_ARTIFACTS/build-info.txt"
+  test "$(git -C KernelSU-Next rev-parse HEAD)" = 0d6bdc6364cbfc73517dcfdf7ab23b0ba8045553
+  python3 "$PIXEL5_ROOT/tools/pixel5-clean/prepare_next_compat.py" --kernel-dir .
   ln -s ../KernelSU-Next/kernel drivers/kernelsu
   printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
   printf '\nsource "drivers/kernelsu/Kconfig"\n' >> drivers/Kconfig
@@ -63,9 +65,12 @@ CONFIG_PY
   cd "$PIXEL5_SRC"
 fi
 
+cp private/msm-google/include/linux/seccomp.h "$PIXEL5_ARTIFACTS/stock-seccomp.h"
+
 export OUT_DIR="$PIXEL5_ROOT/pixel5-kernel-out"
 export DIST_DIR="$PIXEL5_ROOT/pixel5-kernel-dist"
 BUILD_AOSP_KERNEL=1 bash ./build_redbull-gki.sh -j"$(nproc)"
+cmp private/msm-google/include/linux/seccomp.h "$PIXEL5_ARTIFACTS/stock-seccomp.h"
 
 python3 - "$PIXEL5_MODE" "$OUT_DIR" "$DIST_DIR" "$PIXEL5_ARTIFACTS" <<'VERIFY_PY'
 from pathlib import Path
